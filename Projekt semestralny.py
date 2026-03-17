@@ -9,12 +9,16 @@ ssl._create_default_https_context = ssl._create_unverified_context
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QTextEdit, QListWidget, QTabWidget,
-    QFileDialog, QLabel, QInputDialog, QMessageBox
+    QFileDialog, QLabel, QInputDialog, QMessageBox, QTableWidgetItem
 )
-from PyQt6.QtGui import QAction
+from PyQt6.QtGui import (
+    QAction, QBrush, QColor, QPen
+)
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QListWidgetItem
+from PyQt6.QtCore import (Qt, QRectF)
+from PyQt6.QtWidgets import (
+    QListWidgetItem, QGraphicsView, QGraphicsScene, QTableWidget
+)
 
 from Bio import Entrez
 Entrez.email = "erykasworczuk993@gmail.com"
@@ -31,7 +35,7 @@ class DNAAnalyzer(QMainWindow):
         self.setWindowTitle("Analiza motywów DNA")
         self.resize(1000, 650)
 
-        self.sequence = ""
+        self.sequences = []
         self.motifs = []
 
         self.recent_files = []
@@ -71,8 +75,15 @@ class DNAAnalyzer(QMainWindow):
 
             # zapis do zmiennej sequence
             lines = fasta_data.splitlines()
-            self.sequence = "".join([l.strip() for l in lines if not l.startswith(">")])
-            self.sequence_view.setText(self.sequence)
+
+            sequence = "".join([l.strip() for l in lines if not l.startswith(">")])
+
+            self.sequences.append({
+                "name": query,
+                "sequence": sequence
+            })
+
+            self.refresh_sequence_view()
 
             self.log(f"Pobrano sekwencję '{query}' z NCBI (ID: {seq_id})")
 
@@ -80,7 +91,7 @@ class DNAAnalyzer(QMainWindow):
             ncbi_entry = {
                 "query": query,
                 "id": seq_id,
-                "sequence": self.sequence
+                "sequence": sequence
             }
             self.update_recent_ncbi(ncbi_entry)
 
@@ -245,8 +256,31 @@ class DNAAnalyzer(QMainWindow):
         self.tabs.addTab(motif_widget, "Wybór motywów")
 
         # Wyniki
-        self.results_view = QTextEdit()
-        self.tabs.addTab(self.results_view, "Wyniki analizy")
+        # ===== WYNIKI =====
+
+        results_widget = QWidget()
+        results_layout = QVBoxLayout()
+
+        # tabela wyników
+        self.results_table = QTableWidget()
+        results_layout.addWidget(self.results_table)
+
+        # wizualizacja genomu
+        self.visual_scene = QGraphicsScene()
+        self.visual_view = QGraphicsView(self.visual_scene)
+        self.visual_view.setMinimumHeight(220)
+
+        results_layout.addWidget(self.visual_view)
+
+        # lista pozycji motywów
+        self.positions_view = QTextEdit()
+        self.positions_view.setReadOnly(True)
+
+        results_layout.addWidget(self.positions_view)
+
+        results_widget.setLayout(results_layout)
+
+        self.tabs.addTab(results_widget, "Wyniki analizy")
 
         # Wizualizacja
         self.visual_view = QTextEdit()
@@ -309,11 +343,16 @@ class DNAAnalyzer(QMainWindow):
             with open(path) as f:
                 lines = f.readlines()
 
-            self.sequence = "".join(
+            sequence = "".join(
                 [l.strip() for l in lines if not l.startswith(">")]
             )
 
-            self.sequence_view.setText(self.sequence)
+            self.sequences.append({
+                "name": os.path.basename(path),
+                "sequence": sequence
+            })
+
+            self.refresh_sequence_view()
 
             self.log(f"Plik wczytany: {path}")
 
@@ -322,6 +361,15 @@ class DNAAnalyzer(QMainWindow):
         except Exception:
             self.log(f"Błąd wczytywania pliku: {path}")
 
+    def refresh_sequence_view(self):
+
+        text = ""
+
+        for seq in self.sequences:
+            text += f">{seq['name']}\n"
+            text += seq["sequence"] + "\n\n"
+
+        self.sequence_view.setText(text)
     # =========================
     # MOTYWY
     # =========================
@@ -349,44 +397,148 @@ class DNAAnalyzer(QMainWindow):
 
     def run_analysis(self):
 
-        if not self.sequence:
-            self.log("Brak sekwencji DNA")
+        if not self.sequences:
+            self.log("Brak sekwencji")
             return
 
-        results = ""
+        motifs = []
 
         for i in range(self.motif_list.count()):
 
             item = self.motif_list.item(i)
 
-            # jeśli motyw odznaczony → pomijamy
-            if item.checkState() != Qt.CheckState.Checked:
-                continue
+            if item.checkState() == Qt.CheckState.Checked:
+                motifs.append(item.text())
 
-            motif = item.text()
+        if not motifs:
+            self.log("Brak motywów")
+            return
 
-            positions = []
-            start = 0
+        columns = ["Motyw"]
 
-            while True:
+        for seq in self.sequences:
+            columns.append(seq["name"])
 
-                pos = self.sequence.find(motif, start)
+        self.results_table.setColumnCount(len(columns))
+        self.results_table.setHorizontalHeaderLabels(columns)
 
-                if pos == -1:
-                    break
+        self.results_table.setRowCount(len(motifs))
 
-                positions.append(pos)
-                start = pos + 1
+        for row, motif in enumerate(motifs):
 
-            results += f"\nMotyw {motif}\n"
-            results += f"Wystąpienia: {len(positions)}\n"
+            self.results_table.setItem(row, 0, QTableWidgetItem(motif))
 
-            for p in positions:
-                results += f"pozycja {p}\n"
+            for col, seq in enumerate(self.sequences):
 
-            self.log(f"Znaleziono {len(positions)} wystąpień motywu {motif}")
+                count = seq["sequence"].count(motif)
 
-        self.results_view.setText(results)
+                item = QTableWidgetItem(str(count))
+
+                if count > 0:
+                    item.setBackground(QColor("lightgreen"))
+
+                self.results_table.setItem(row, col + 1, item)
+
+        self.results_table.resizeColumnsToContents()
+
+        self.draw_genome_map(motifs)
+
+        pos_text = self.get_motif_positions(motifs)
+
+        self.positions_view.setText(pos_text)
+
+        self.log("Analiza zakończona")
+
+    def draw_genome_map(self, motifs):
+
+        self.visual_scene.clear()
+
+        y = 40
+        scale = 0.3
+
+        colors = [
+            QColor("yellow"),
+            QColor("orange"),
+            QColor("cyan"),
+            QColor("pink"),
+            QColor("green")
+        ]
+
+        for seq in self.sequences:
+
+            sequence = seq["sequence"]
+            name = seq["name"]
+
+            length = len(sequence)
+
+            self.visual_scene.addText(name).setPos(10, y - 20)
+
+            genome_line = QRectF(120, y, length * scale, 6)
+
+            self.visual_scene.addRect(genome_line, QPen(), QBrush(QColor("lightgray")))
+
+            for m_index, motif in enumerate(motifs):
+
+                start = 0
+
+                while True:
+
+                    pos = sequence.find(motif, start)
+
+                    if pos == -1:
+                        break
+
+                    x = 120 + pos * scale
+                    w = len(motif) * scale
+
+                    rect = QRectF(x, y - 5, w, 16)
+
+                    color = colors[m_index % len(colors)]
+
+                    self.visual_scene.addRect(rect, QPen(), QBrush(color))
+
+                    start = pos + 1
+
+            y += 60
+
+    def get_motif_positions(self, motifs):
+
+        text = ""
+
+        for seq in self.sequences:
+
+            sequence = seq["sequence"]
+            name = seq["name"]
+
+            text += f"{name}\n"
+
+            for motif in motifs:
+
+                positions = []
+
+                start = 0
+
+                while True:
+
+                    pos = sequence.find(motif, start)
+
+                    if pos == -1:
+                        break
+
+                    positions.append(pos)
+
+                    start = pos + 1
+
+                if positions:
+                    pos_text = ", ".join(map(str, positions))
+                else:
+                    pos_text = "brak"
+
+                text += f"{motif} : {pos_text}\n"
+
+            text += "\n"
+
+        return text
 
     # =========================
     # RECENT FILES
