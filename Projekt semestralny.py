@@ -17,11 +17,14 @@ from PyQt6.QtGui import (
 
 from PyQt6.QtCore import (Qt, QRectF)
 from PyQt6.QtWidgets import (
-    QListWidgetItem, QGraphicsView, QGraphicsScene, QTableWidget
+    QListWidgetItem, QGraphicsView, QGraphicsScene, QTableWidget, QGraphicsTextItem
 )
 
 from Bio import Entrez
 Entrez.email = "erykasworczuk993@gmail.com"
+
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
 
 
 RECENT_FILE_STORAGE = "recent_files.json"
@@ -95,6 +98,9 @@ class DNAAnalyzer(QMainWindow):
             }
             self.update_recent_ncbi(ncbi_entry)
 
+            fake_path = f"NCBI: {query} ({seq_id})"
+            self.update_recent_files(fake_path)
+
         except Exception as e:
             self.log(f"Błąd pobierania z NCBI: {e}")
             QMessageBox.critical(self, "Błąd", f"Nie udało się pobrać sekwencji z NCBI:\n{str(e)}")
@@ -120,9 +126,14 @@ class DNAAnalyzer(QMainWindow):
             index = items.index(item)
             entry = self.recent_ncbi[index]
 
-            self.sequence = entry["sequence"]
-            self.sequence_view.setText(self.sequence)
-            self.log(f"Wczytano sekwencję z historii NCBI: {entry['query']}")
+            self.sequences.append({
+                "name": entry["query"],
+                "sequence": entry["sequence"]
+            })
+
+            self.refresh_sequence_view()
+
+            self.log(f"Dodano sekwencję z historii NCBI: {entry['query']}")
 
     def update_recent_ncbi(self, entry):
         """Aktualizuje listę ostatnich pobrań z NCBI"""
@@ -209,6 +220,7 @@ class DNAAnalyzer(QMainWindow):
         btn_run = QPushButton("Uruchom analizę")
         btn_export = QPushButton("Eksportuj CSV/PDF")
 
+
         btn_load.clicked.connect(self.load_file)
         btn_add_motif.clicked.connect(self.add_motif)
         btn_run.clicked.connect(self.run_analysis)
@@ -272,6 +284,7 @@ class DNAAnalyzer(QMainWindow):
 
         results_layout.addWidget(self.visual_view)
 
+
         # lista pozycji motywów
         self.positions_view = QTextEdit()
         self.positions_view.setReadOnly(True)
@@ -282,10 +295,16 @@ class DNAAnalyzer(QMainWindow):
 
         self.tabs.addTab(results_widget, "Wyniki analizy")
 
-        # Wizualizacja
-        self.visual_view = QTextEdit()
-        self.visual_view.setText("Tutaj można dodać wizualizację genomu")
-        self.tabs.addTab(self.visual_view, "Wizualizacja")
+        # zakładka "Wizualizacja" – tylko wykres słupkowy
+        self.visual_figure = Figure(figsize=(6, 4))
+        self.visual_canvas = FigureCanvas(self.visual_figure)
+
+        visual_widget = QWidget()
+        visual_layout = QVBoxLayout()
+        visual_layout.addWidget(self.visual_canvas)
+        visual_widget.setLayout(visual_layout)
+
+        self.tabs.addTab(visual_widget, "Wizualizacja")
 
         # Eksport
         self.export_view = QTextEdit()
@@ -358,8 +377,37 @@ class DNAAnalyzer(QMainWindow):
 
             self.update_recent_files(path)
 
-        except Exception:
-            self.log(f"Błąd wczytywania pliku: {path}")
+        except Exception as e:
+            self.log(f"Błąd wczytywania pliku: {path} | {e}")
+
+    def open_recent_file(self, item):
+        text = item.text()
+
+        try:
+            # ===== NCBI =====
+            if text.startswith("NCBI:"):
+
+                if "(" not in text:
+                    return
+
+                seq_id = text.split("(")[-1].replace(")", "").strip()
+
+                for entry in self.recent_ncbi:
+                    if entry["id"] == seq_id:
+                        self.sequences.append({
+                            "name": entry["query"],
+                            "sequence": entry["sequence"]
+                        })
+
+                        self.refresh_sequence_view()
+                        self.log(f"Dodano sekwencję z sidebar NCBI: {entry['query']}")
+                        return
+
+            # ===== PLIK =====
+            self.open_file(text)
+
+        except Exception as e:
+            self.log(f"Błąd kliknięcia recent: {e}")
 
     def refresh_sequence_view(self):
 
@@ -442,6 +490,7 @@ class DNAAnalyzer(QMainWindow):
         self.results_table.resizeColumnsToContents()
 
         self.draw_genome_map(motifs)
+        self.draw_motif_bar_chart(motifs)
 
         pos_text = self.get_motif_positions(motifs)
 
@@ -450,56 +499,70 @@ class DNAAnalyzer(QMainWindow):
         self.log("Analiza zakończona")
 
     def draw_genome_map(self, motifs):
-
         self.visual_scene.clear()
 
         y = 40
-        scale = 0.3
+        scale = 20  # szerokość i wysokość prostokąta literowego
 
-        colors = [
-            QColor("yellow"),
-            QColor("orange"),
-            QColor("cyan"),
-            QColor("pink"),
-            QColor("green")
+        # Pastelowe kolory nukleotydów
+        nucleotide_colors = {
+            "A": QColor(173, 255, 47),  # pastelowa zieleń
+            "T": QColor(255, 182, 193),  # pastelowy róż
+            "G": QColor(255, 255, 153),  # pastelowy żółty
+            "C": QColor(135, 206, 250)  # pastelowy niebieski
+        }
+
+        # Pastelowe kolory motywów
+        motif_colors = [
+            QColor(255, 160, 122),  # pastelowy łosoś
+            QColor(216, 191, 216),  # pastelowy fiolet
+            QColor(144, 238, 144),  # pastelowa zieleń
+            QColor(221, 160, 221),  # pastelowy orchidea
+            QColor(255, 228, 181)  # pastelowa morela
         ]
 
         for seq in self.sequences:
-
             sequence = seq["sequence"]
             name = seq["name"]
 
-            length = len(sequence)
+            # nazwa sekwencji
+            self.visual_scene.addText(name).setPos(10, y - 25)
 
-            self.visual_scene.addText(name).setPos(10, y - 20)
+            # Rysujemy każdą literę sekwencji w podstawowym kolorze
+            for i, nucleotide in enumerate(sequence):
+                x = 120 + i * scale
+                rect = QRectF(x, y, scale, scale)
+                color = nucleotide_colors.get(nucleotide.upper(), QColor(211, 211, 211))  # pastelowy szary
+                self.visual_scene.addRect(rect, QPen(Qt.GlobalColor.black), QBrush(color))
 
-            genome_line = QRectF(120, y, length * scale, 6)
+                text_item = QGraphicsTextItem(nucleotide)
+                text_item.setPos(x + 4, y)  # przesunięcie w prostokącie
+                self.visual_scene.addItem(text_item)
 
-            self.visual_scene.addRect(genome_line, QPen(), QBrush(QColor("lightgray")))
-
+            # Nakładamy motywy
             for m_index, motif in enumerate(motifs):
-
                 start = 0
-
                 while True:
-
                     pos = sequence.find(motif, start)
-
                     if pos == -1:
                         break
 
-                    x = 120 + pos * scale
-                    w = len(motif) * scale
+                    # Każdy nukleotyd w motywie zmienia kolor prostokąta
+                    motif_color = motif_colors[m_index % len(motif_colors)]
+                    for j, nucleotide in enumerate(motif):
+                        x = 120 + (pos + j) * scale
+                        rect = QRectF(x, y, scale, scale)
+                        # pastelowy kolor motywu dla prostokąta
+                        self.visual_scene.addRect(rect, QPen(Qt.GlobalColor.black), QBrush(motif_color))
 
-                    rect = QRectF(x, y - 5, w, 16)
-
-                    color = colors[m_index % len(colors)]
-
-                    self.visual_scene.addRect(rect, QPen(), QBrush(color))
+                        # litera nadal jest widoczna
+                        text_item = QGraphicsTextItem(nucleotide)
+                        text_item.setPos(x + 4, y)
+                        self.visual_scene.addItem(text_item)
 
                     start = pos + 1
 
-            y += 60
+            y += 40
 
     def get_motif_positions(self, motifs):
 
@@ -540,6 +603,33 @@ class DNAAnalyzer(QMainWindow):
 
         return text
 
+    def draw_motif_bar_chart(self, motifs):
+        """Rysuje grouped bar chart: motywy na osi X, słupki obok siebie dla sekwencji"""
+        self.visual_figure.clear()
+        ax = self.visual_figure.add_subplot(111)
+
+        n_seq = len(self.sequences)
+        n_motif = len(motifs)
+
+        # szerokość jednego słupka
+        bar_width = 0.8 / n_seq  # cała grupa zajmuje 0.8, dzielimy na sekwencje
+
+        # pozycje grup motywów na osi X
+        x = range(n_motif)
+
+        for i, seq in enumerate(self.sequences):
+            counts = [seq["sequence"].count(m) for m in motifs]
+            # przesunięcie słupków w grupie
+            positions = [xi + i * bar_width for xi in x]
+            ax.bar(positions, counts, width=bar_width, label=seq["name"])
+
+        ax.set_xticks([xi + bar_width * (n_seq / 2) for xi in x])
+        ax.set_xticklabels(motifs)
+        ax.set_ylabel("Liczba wystąpień")
+        ax.set_title("Wystąpienia motywów DNA w sekwencjach")
+        ax.legend()
+        self.visual_canvas.draw()
+
     # =========================
     # RECENT FILES
     # =========================
@@ -552,10 +642,18 @@ class DNAAnalyzer(QMainWindow):
         self.recent_files.insert(0, path)
 
         if len(self.recent_files) > self.max_recent:
-            self.recent_files.pop()
+            self.recent_files = self.recent_files[:self.max_recent]
 
-        self.refresh_recent_list()
-        self.refresh_recent_menu()
+        self.recent_list.clear()
+        for f in self.recent_files:
+            self.recent_list.addItem(f)
+
+        self.recent_menu.clear()
+        for f in self.recent_files:
+            action = QAction(f, self)
+            action.triggered.connect(lambda checked=False, p=f: self.open_file(p))
+            self.recent_menu.addAction(action)
+
         self.save_recent_files()
 
     def refresh_recent_list(self):
@@ -579,10 +677,6 @@ class DNAAnalyzer(QMainWindow):
 
             self.recent_menu.addAction(action)
 
-    def open_recent_file(self, item):
-
-        path = item.text()
-        self.open_file(path)
 
     # =========================
     # JSON STORAGE
@@ -598,19 +692,23 @@ class DNAAnalyzer(QMainWindow):
             pass
 
     def load_recent_files(self):
-
         if os.path.exists(RECENT_FILE_STORAGE):
-
             try:
                 with open(RECENT_FILE_STORAGE) as f:
                     self.recent_files = json.load(f)
-
             except Exception:
                 self.recent_files = []
 
-        self.refresh_recent_list()
-        self.refresh_recent_menu()
 
+        self.recent_list.clear()
+        for f in self.recent_files:
+            self.recent_list.addItem(f)
+
+        self.recent_menu.clear()
+        for f in self.recent_files:
+            action = QAction(f, self)
+            action.triggered.connect(lambda checked=False, p=f: self.open_file(p))
+            self.recent_menu.addAction(action)
 
 # =========================
 # START PROGRAMU
