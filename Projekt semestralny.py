@@ -2,36 +2,33 @@ import sys
 import json
 import os
 import ssl
-
-# WYŁĄCZENIE SSL dla NCBI (tylko testy)
-ssl._create_default_https_context = ssl._create_unverified_context
+import csv
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QTextEdit, QListWidget, QTabWidget,
-    QFileDialog, QLabel, QInputDialog, QMessageBox, QTableWidgetItem
-)
-from PyQt6.QtGui import (
-    QAction, QBrush, QColor, QPen
+    QPushButton, QTextEdit, QListWidget, QTabWidget, QFileDialog,
+    QLabel, QInputDialog, QMessageBox, QTableWidget, QTableWidgetItem,
+    QListWidgetItem, QGraphicsView, QGraphicsScene, QGraphicsTextItem
 )
 
-from PyQt6.QtCore import (Qt, QRectF)
-from PyQt6.QtWidgets import (
-    QListWidgetItem, QGraphicsView, QGraphicsScene, QTableWidget, QGraphicsTextItem
-)
+from PyQt6.QtGui import QAction, QBrush, QColor, QPen
+from PyQt6.QtCore import Qt, QRectF
 
 from Bio import Entrez
-Entrez.email = "erykasworczuk993@gmail.com"
-
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
+from matplotlib.backends.backend_pdf import PdfPages
 
-
+# ===== STAŁE =====
 RECENT_FILE_STORAGE = "recent_files.json"
 RECENT_NCBI_STORAGE = "recent_ncbi.json"
 
+ssl._create_default_https_context = ssl._create_unverified_context
+Entrez.email = "erykasworczuk993@gmail.com"
+
 class DNAAnalyzer(QMainWindow):
 
+    # 1
     def __init__(self):
         super().__init__()
 
@@ -48,7 +45,7 @@ class DNAAnalyzer(QMainWindow):
         self.init_ui()
         self.load_recent_files()
         self.load_recent_ncbi()
-
+    #2 ncbi
     def fetch_from_ncbi(self):
         # zapytanie od użytkownika
         query, ok = QInputDialog.getText(self, "Pobierz z NCBI", "Wpisz nazwę genu lub ID:")
@@ -162,68 +159,75 @@ class DNAAnalyzer(QMainWindow):
             except Exception as e:
                 self.log(f"Błąd wczytywania historii NCBI: {e}")
                 self.recent_ncbi = []
-    # =========================
-    # GUI
-    # =========================
-
+    # 3. GUI
     def init_ui(self):
-
-        # ===== MENU =====
-
+        # MENU
         menu = self.menuBar()
 
         self.file_menu = menu.addMenu("Plik")
-        menu.addMenu("Motywy")
+        self.motif_menu = menu.addMenu("Motywy")
         self.ncbi_menu = menu.addMenu("NCBI")
-        menu.addMenu("Eksport")
+        self.export_menu = menu.addMenu("Eksport")
         menu.addMenu("Pomoc")
 
+        #  Plik
         open_action = QAction("Otwórz FASTA", self)
         open_action.triggered.connect(self.load_file)
         self.file_menu.addAction(open_action)
 
         self.file_menu.addSeparator()
-
         self.recent_menu = self.file_menu.addMenu("Ostatnie pliki")
-
         self.file_menu.addSeparator()
 
         exit_action = QAction("Wyjście", self)
         exit_action.triggered.connect(self.close)
         self.file_menu.addAction(exit_action)
 
+        # Motywy
+        add_motif_action = QAction("Dodaj motyw", self)
+        add_motif_action.triggered.connect(self.add_motif)
+
+        remove_motif_action = QAction("Usuń zaznaczony motyw", self)
+        remove_motif_action.triggered.connect(self.remove_selected_motif)
+
+        self.motif_menu.addAction(add_motif_action)
+        self.motif_menu.addAction(remove_motif_action)
+
+        # NCBI
         fetch_action = QAction("Pobierz sekwencję z NCBI", self)
-        fetch_action.triggered.connect(self.fetch_from_ncbi)  # podłączamy funkcję
+        fetch_action.triggered.connect(self.fetch_from_ncbi)
         self.ncbi_menu.addAction(fetch_action)
 
         recent_ncbi_action = QAction("Ostatnie pobrania NCBI", self)
         recent_ncbi_action.triggered.connect(self.show_recent_ncbi)
         self.ncbi_menu.addAction(recent_ncbi_action)
 
-        # ===== LAYOUT GŁÓWNY =====
+        # Eksport
+        export_action = QAction("Eksportuj wyniki", self)
+        export_action.triggered.connect(self.export_results)
+        self.export_menu.addAction(export_action)
+
+        # CENTRAL WIDGET
 
         main_widget = QWidget()
         main_layout = QVBoxLayout()
-
         content_layout = QHBoxLayout()
 
-        # =========================
-        # PANEL BOCZNY
-        # =========================
+        # SIDEBAR
 
         sidebar = QVBoxLayout()
 
         btn_load = QPushButton("Wczytaj plik")
         btn_ncbi = QPushButton("Pobierz z NCBI")
-        btn_ncbi.clicked.connect(self.fetch_from_ncbi)
         btn_add_motif = QPushButton("Dodaj motyw")
         btn_run = QPushButton("Uruchom analizę")
         btn_export = QPushButton("Eksportuj CSV/PDF")
 
-
         btn_load.clicked.connect(self.load_file)
+        btn_ncbi.clicked.connect(self.fetch_from_ncbi)
         btn_add_motif.clicked.connect(self.add_motif)
         btn_run.clicked.connect(self.run_analysis)
+        btn_export.clicked.connect(self.export_results)
 
         sidebar.addWidget(btn_load)
         sidebar.addWidget(btn_ncbi)
@@ -235,7 +239,6 @@ class DNAAnalyzer(QMainWindow):
 
         self.recent_list = QListWidget()
         self.recent_list.itemClicked.connect(self.open_recent_file)
-
         sidebar.addWidget(self.recent_list)
 
         sidebar.addStretch()
@@ -243,9 +246,7 @@ class DNAAnalyzer(QMainWindow):
         sidebar_widget = QWidget()
         sidebar_widget.setLayout(sidebar)
 
-        # =========================
-        # ZAKŁADKI
-        # =========================
+        # TABS
 
         self.tabs = QTabWidget()
 
@@ -264,64 +265,45 @@ class DNAAnalyzer(QMainWindow):
         motif_layout.addWidget(self.motif_list)
 
         motif_widget.setLayout(motif_layout)
-
         self.tabs.addTab(motif_widget, "Wybór motywów")
 
         # Wyniki
-        # ===== WYNIKI =====
-
         results_widget = QWidget()
         results_layout = QVBoxLayout()
 
-        # tabela wyników
         self.results_table = QTableWidget()
         results_layout.addWidget(self.results_table)
 
-        # wizualizacja genomu
         self.visual_scene = QGraphicsScene()
         self.visual_view = QGraphicsView(self.visual_scene)
         self.visual_view.setMinimumHeight(220)
-
         results_layout.addWidget(self.visual_view)
 
-
-        # lista pozycji motywów
         self.positions_view = QTextEdit()
         self.positions_view.setReadOnly(True)
-
         results_layout.addWidget(self.positions_view)
 
         results_widget.setLayout(results_layout)
-
         self.tabs.addTab(results_widget, "Wyniki analizy")
 
-        # zakładka "Wizualizacja" – tylko wykres słupkowy
+        # Wizualizacja
         self.visual_figure = Figure(figsize=(6, 4))
         self.visual_canvas = FigureCanvas(self.visual_figure)
 
         visual_widget = QWidget()
         visual_layout = QVBoxLayout()
         visual_layout.addWidget(self.visual_canvas)
-        visual_widget.setLayout(visual_layout)
 
+        visual_widget.setLayout(visual_layout)
         self.tabs.addTab(visual_widget, "Wizualizacja")
 
-        # Eksport
-        self.export_view = QTextEdit()
-        self.export_view.setText("Panel eksportu wyników")
-        self.tabs.addTab(self.export_view, "Eksport")
-
-        # =========================
         # LOGI
-        # =========================
 
         self.logs = QTextEdit()
         self.logs.setReadOnly(True)
         self.logs.setMaximumHeight(120)
 
-        # =========================
-        # SKŁADANIE GUI
-        # =========================
+        # SKŁADANIE UI
 
         content_layout.addWidget(sidebar_widget, 1)
         content_layout.addWidget(self.tabs, 4)
@@ -330,19 +312,14 @@ class DNAAnalyzer(QMainWindow):
         main_layout.addWidget(self.logs)
 
         main_widget.setLayout(main_layout)
-
         self.setCentralWidget(main_widget)
 
-    # =========================
     # LOG
-    # =========================
 
     def log(self, text):
         self.logs.append("> " + text)
 
-    # =========================
     # WCZYTYWANIE FASTA
-    # =========================
 
     def load_file(self):
 
@@ -403,7 +380,7 @@ class DNAAnalyzer(QMainWindow):
                         self.log(f"Dodano sekwencję z sidebar NCBI: {entry['query']}")
                         return
 
-            # ===== PLIK =====
+            #  PLIK
             self.open_file(text)
 
         except Exception as e:
@@ -418,9 +395,8 @@ class DNAAnalyzer(QMainWindow):
             text += seq["sequence"] + "\n\n"
 
         self.sequence_view.setText(text)
-    # =========================
+
     # MOTYWY
-    # =========================
 
     def add_motif(self):
 
@@ -439,9 +415,128 @@ class DNAAnalyzer(QMainWindow):
 
             self.log(f"Motyw dodany: {motif}")
 
-    # =========================
+    def remove_selected_motif(self):
+        if self.motif_list.count() == 0:
+            self.log("Brak motywów do usunięcia")
+            return
+
+        motifs = [self.motif_list.item(i).text() for i in range(self.motif_list.count())]
+
+        motif, ok = QInputDialog.getItem(
+            self,
+            "Usuń motyw",
+            "Wybierz motyw do usunięcia:",
+            motifs,
+            0,
+            False
+        )
+
+        if ok and motif:
+            for i in range(self.motif_list.count()):
+                item = self.motif_list.item(i)
+                if item.text() == motif:
+                    self.motif_list.takeItem(i)
+                    self.log(f"Usunięto motyw: {motif}")
+                    break
+    # EKSPORT
+    def export_results(self):
+        import csv
+        from matplotlib.backends.backend_pdf import PdfPages
+
+        if self.results_table.rowCount() == 0:
+            self.log("Brak danych do eksportu")
+            return
+
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Zapisz CSV",
+            "",
+            "CSV (*.csv)"
+        )
+
+        if not path:
+            return
+
+        try:
+            with open(path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f, delimiter=";")
+
+                # ===== TABELA 1: LICZBA WYSTĄPIEŃ =====
+                writer.writerow(["LICZBA WYSTĄPIEŃ MOTYWÓW"])
+
+                headers = ["Motyw"]
+                for seq in self.sequences:
+                    headers.append(seq["name"])
+
+                writer.writerow(headers)
+
+                for row in range(self.results_table.rowCount()):
+                    row_data = []
+
+                    for col in range(self.results_table.columnCount()):
+                        item = self.results_table.item(row, col)
+                        row_data.append(item.text() if item else "")
+
+                    writer.writerow(row_data)
+
+                #  PRZERWA
+                writer.writerow([])
+                writer.writerow([])
+
+                #  TABELA 2: POZYCJE MOTYWÓW
+                writer.writerow([" POZYCJE MOTYWÓW "])
+
+                headers = ["Motyw"]
+                for seq in self.sequences:
+                    headers.append(seq["name"])
+
+                writer.writerow(headers)
+
+                for i in range(self.motif_list.count()):
+                    motif = self.motif_list.item(i).text()
+
+                    row_data = [motif]
+
+                    for seq in self.sequences:
+                        sequence = seq["sequence"]
+
+                        positions = []
+                        start = 0
+
+                        while True:
+                            pos = sequence.find(motif, start)
+                            if pos == -1:
+                                break
+                            positions.append(str(pos))
+                            start = pos + 1
+
+                        pos_text = ",".join(positions) if positions else "brak"
+
+                        row_data.append(pos_text)
+
+                    writer.writerow(row_data)
+
+            self.log(f"Zapisano CSV: {path}")
+
+        except Exception as e:
+            self.log(f"Błąd CSV: {e}")
+            return
+
+        # PDF
+        pdf_path = path.replace(".csv", ".pdf")
+
+        try:
+            with PdfPages(pdf_path) as pdf:
+                pdf.savefig(self.visual_figure)
+
+            self.log(f"Zapisano PDF (wykres): {pdf_path}")
+
+        except Exception as e:
+            self.log(f"Błąd PDF: {e}")
+
+
     # ANALIZA DNA
-    # =========================
+
 
     def run_analysis(self):
 
@@ -504,21 +599,19 @@ class DNAAnalyzer(QMainWindow):
         y = 40
         scale = 20  # szerokość i wysokość prostokąta literowego
 
-        # Pastelowe kolory nukleotydów
         nucleotide_colors = {
-            "A": QColor(173, 255, 47),  # pastelowa zieleń
-            "T": QColor(255, 182, 193),  # pastelowy róż
-            "G": QColor(255, 255, 153),  # pastelowy żółty
-            "C": QColor(135, 206, 250)  # pastelowy niebieski
+            "A": QColor(173, 255, 47),
+            "T": QColor(255, 182, 193),
+            "G": QColor(255, 255, 153),
+            "C": QColor(135, 206, 250)
         }
 
-        # Pastelowe kolory motywów
         motif_colors = [
-            QColor(255, 160, 122),  # pastelowy łosoś
-            QColor(216, 191, 216),  # pastelowy fiolet
-            QColor(144, 238, 144),  # pastelowa zieleń
-            QColor(221, 160, 221),  # pastelowy orchidea
-            QColor(255, 228, 181)  # pastelowa morela
+            QColor(255, 160, 122),
+            QColor(216, 191, 216),
+            QColor(144, 238, 144),
+            QColor(221, 160, 221),
+            QColor(255, 228, 181)
         ]
 
         for seq in self.sequences:
@@ -623,16 +716,15 @@ class DNAAnalyzer(QMainWindow):
             positions = [xi + i * bar_width for xi in x]
             ax.bar(positions, counts, width=bar_width, label=seq["name"])
 
-        ax.set_xticks([xi + bar_width * (n_seq / 2) for xi in x])
+        # Ustawienie etykiet motywów na osi X w środku grupy
+        ax.set_xticks([xi + bar_width * (n_seq / 2) - (bar_width / 2) for xi in x])
         ax.set_xticklabels(motifs)
         ax.set_ylabel("Liczba wystąpień")
         ax.set_title("Wystąpienia motywów DNA w sekwencjach")
         ax.legend()
         self.visual_canvas.draw()
 
-    # =========================
     # RECENT FILES
-    # =========================
 
     def update_recent_files(self, path):
 
@@ -677,10 +769,7 @@ class DNAAnalyzer(QMainWindow):
 
             self.recent_menu.addAction(action)
 
-
-    # =========================
     # JSON STORAGE
-    # =========================
 
     def save_recent_files(self):
 
@@ -710,9 +799,7 @@ class DNAAnalyzer(QMainWindow):
             action.triggered.connect(lambda checked=False, p=f: self.open_file(p))
             self.recent_menu.addAction(action)
 
-# =========================
 # START PROGRAMU
-# =========================
 
 app = QApplication(sys.argv)
 
