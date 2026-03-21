@@ -1,6 +1,4 @@
 import sys
-import ssl
-import csv
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -20,19 +18,25 @@ from core.analysis import (
     save_csv,
     save_pdf,
     count_motif,
-    find_positions,
-    get_motif_positions
+    get_motif_positions,
+    count_motifs_for_sequence,
+    get_positions_single
 )
 
 from core.fasta import parse_fasta_file
 from core.ncbi import fetch_sequence_from_ncbi
-
 from utils.json_utils import load_json, save_json
+from services.analysis_service import AnalysisService
+
 
 
 class DNAAnalyzer(QMainWindow):
 
-    # 1
+    VIEW_HEIGHT = 220
+    LEFT_MARGIN = 120
+    SCALE = 20
+    ROW_HEIGHT = 40
+
     def __init__(self):
         super().__init__()
 
@@ -51,90 +55,7 @@ class DNAAnalyzer(QMainWindow):
         self.refresh_recent_list()
         self.refresh_recent_menu()
 
-
-    #2 ncbi
-    def fetch_from_ncbi(self):
-
-        query, ok = QInputDialog.getText(
-            self,
-            "Pobierz z NCBI",
-            "Wpisz nazwę genu lub ID:"
-        )
-
-        if not ok or not query:
-            return
-
-
-        self.log(f"Szukam sekwencji dla: {query}...")
-
-        entry = fetch_sequence_from_ncbi(query)
-
-        if not entry:
-            self.log("Nie znaleziono sekwencji")
-            QMessageBox.warning(self, "Brak wyników", "Nie znaleziono")
-            return
-
-        self.sequences.append({
-            "name": entry["query"],
-            "sequence": entry["sequence"]
-        })
-
-        self.refresh_sequence_view()
-
-        self.update_recent_ncbi(entry)
-
-        self.update_recent_files(
-            f"NCBI: {query} ({entry['id']})"
-        )
-
-    def show_recent_ncbi(self):
-
-        if not self.recent_ncbi:
-            QMessageBox.information(
-                self,
-                "Ostatnie pobrania NCBI",
-                "Brak historii"
-            )
-            return
-
-        items = [f"{e['query']} (ID: {e['id']})" for e in self.recent_ncbi]
-
-        item, ok = QInputDialog.getItem(
-            self,
-            "Ostatnie pobrania NCBI",
-            "Wybierz:",
-            items,
-            0,
-            False
-        )
-
-        if ok and item:
-            index = items.index(item)
-            entry = self.recent_ncbi[index]
-
-            self.sequences.append({
-                "name": entry["query"],
-                "sequence": entry["sequence"]
-            })
-
-            self.refresh_sequence_view()
-            self.log(f"Dodano z historii NCBI: {entry['query']}")
-
-    def update_recent_ncbi(self, entry):
-
-        self.recent_ncbi = [
-            e for e in self.recent_ncbi if e["id"] != entry["id"]
-        ]
-
-        self.recent_ncbi.insert(0, entry)
-
-        if len(self.recent_ncbi) > self.max_recent:
-            self.recent_ncbi = self.recent_ncbi[:self.max_recent]
-
-        save_json("recent_ncbi.json", self.recent_ncbi)
-
-
-    # 3. GUI
+    # GUI
     def init_ui(self):
         # MENU
         menu = self.menuBar()
@@ -251,7 +172,7 @@ class DNAAnalyzer(QMainWindow):
 
         self.visual_scene = QGraphicsScene()
         self.visual_view = QGraphicsView(self.visual_scene)
-        self.visual_view.setMinimumHeight(220)
+        self.visual_view.setMinimumHeight(self.VIEW_HEIGHT)
         results_layout.addWidget(self.visual_view)
 
         self.positions_view = QTextEdit()
@@ -289,7 +210,88 @@ class DNAAnalyzer(QMainWindow):
         main_widget.setLayout(main_layout)
         self.setCentralWidget(main_widget)
 
-    # LOG
+    # NCBI
+    def fetch_from_ncbi(self):
+
+        query, ok = QInputDialog.getText(
+            self,
+            "Pobierz z NCBI",
+            "Wpisz nazwę genu lub ID:"
+        )
+
+        if not ok or not query:
+            return
+
+
+        self.log(f"Szukam sekwencji dla: {query}...")
+
+        entry = fetch_sequence_from_ncbi(query)
+
+        if not entry:
+            self.log("Nie znaleziono sekwencji")
+            QMessageBox.warning(self, "Brak wyników", "Nie znaleziono")
+            return
+
+        self.sequences.append({
+            "name": entry["query"],
+            "sequence": entry["sequence"]
+        })
+
+        self.refresh_sequence_view()
+
+        self.update_recent_ncbi(entry)
+
+        self.update_recent_files(
+            f"NCBI: {query} ({entry['id']})"
+        )
+
+    def show_recent_ncbi(self):
+
+        if not self.recent_ncbi:
+            QMessageBox.information(
+                self,
+                "Ostatnie pobrania NCBI",
+                "Brak historii"
+            )
+            return
+
+        items = [f"{e['query']} (ID: {e['id']})" for e in self.recent_ncbi]
+
+        item, ok = QInputDialog.getItem(
+            self,
+            "Ostatnie pobrania NCBI",
+            "Wybierz:",
+            items,
+            0,
+            False
+        )
+
+        if ok and item:
+            index = items.index(item)
+            entry = self.recent_ncbi[index]
+
+            self.sequences.append({
+                "name": entry["query"],
+                "sequence": entry["sequence"]
+            })
+
+            self.refresh_sequence_view()
+            self.log(f"Dodano z historii NCBI: {entry['query']}")
+
+    def update_recent_ncbi(self, entry):
+
+        self.recent_ncbi = [
+            e for e in self.recent_ncbi if e["id"] != entry["id"]
+        ]
+
+        self.recent_ncbi.insert(0, entry)
+
+        if len(self.recent_ncbi) > self.max_recent:
+            self.recent_ncbi = self.recent_ncbi[:self.max_recent]
+
+        save_json("recent_ncbi.json", self.recent_ncbi)
+
+    # LOGI
 
     def log(self, text):
         self.logs.append("> " + text)
@@ -357,15 +359,51 @@ class DNAAnalyzer(QMainWindow):
         except Exception as e:
             self.log(f"Błąd kliknięcia recent: {e}")
 
+    # RECENT FILES
+
+    def update_recent_files(self, path):
+
+        if path in self.recent_files:
+            self.recent_files.remove(path)
+
+        self.recent_files.insert(0, path)
+
+        if len(self.recent_files) > self.max_recent:
+            self.recent_files = self.recent_files[:self.max_recent]
+
+        self.refresh_recent_list()
+        self.refresh_recent_menu()
+
+        save_json("recent.json", self.recent_files)
+
+    def refresh_recent_list(self):
+
+        self.recent_list.clear()
+
+        for path in self.recent_files:
+            self.recent_list.addItem(path)
+
+    def refresh_recent_menu(self):
+
+        self.recent_menu.clear()
+
+        for path in self.recent_files:
+            action = QAction(path, self)
+
+            action.triggered.connect(
+                lambda checked=False, p=path: self.open_file(p)
+            )
+
+            self.recent_menu.addAction(action)
     def refresh_sequence_view(self):
 
-        text = ""
-
-        for seq in self.sequences:
-            text += f">{seq['name']}\n"
-            text += seq["sequence"] + "\n\n"
+        text = "\n\n".join(
+            f">{seq['name']}\n{seq['sequence']}"
+            for seq in self.sequences
+        )
 
         self.sequence_view.setText(text)
+
 
     # MOTYWY
     def add_motif(self):
@@ -409,46 +447,12 @@ class DNAAnalyzer(QMainWindow):
                     self.log(f"Usunięto motyw: {motif}")
                     break
 
-    # EKSPORT
-    def export_results(self):
-
-        if self.results_table.rowCount() == 0:
-            self.log("Brak danych do eksportu")
-            return
-
-        path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Zapisz CSV",
-            "",
-            "CSV (*.csv)"
-        )
-
-        if not path:
-            return
-
-        try:
-            from core.analysis import build_export_data, save_csv, save_pdf
-
-            # ✔ MOTYWY zbierane w GUI (bez Qt w core!)
-            motifs = [
-                self.motif_list.item(i).text()
-                for i in range(self.motif_list.count())
-                if self.motif_list.item(i).checkState() == Qt.CheckState.Checked
-            ]
-
-            csv_data, pdf_fig = build_export_data(self, motifs)
-
-            save_csv(path, csv_data)
-
-            pdf_path = path.replace(".csv", ".pdf")
-            save_pdf(pdf_path, pdf_fig)
-
-            self.log(f"Zapisano CSV: {path}")
-            self.log(f"Zapisano PDF: {pdf_path}")
-
-        except Exception as e:
-            self.log(f"Błąd eksportu: {e}")
-
+    def get_selected_motifs(self):
+        return [
+            self.motif_list.item(i).text()
+            for i in range(self.motif_list.count())
+            if self.motif_list.item(i).checkState() == Qt.CheckState.Checked
+        ]
 
     # ANALIZA DNA
 
@@ -458,12 +462,7 @@ class DNAAnalyzer(QMainWindow):
             self.log("Brak sekwencji")
             return
 
-        motifs = []
-
-        for i in range(self.motif_list.count()):
-            item = self.motif_list.item(i)
-            if item.checkState() == Qt.CheckState.Checked:
-                motifs.append(item.text())
+        motifs = self.get_selected_motifs()
 
         if not motifs:
             self.log("Brak motywów")
@@ -477,29 +476,38 @@ class DNAAnalyzer(QMainWindow):
         self.results_table.setHorizontalHeaderLabels(columns)
         self.results_table.setRowCount(len(motifs))
 
-        for row, motif in enumerate(motifs):
+        service = AnalysisService(self.sequences)
+        results = service.count_all(motifs)
 
-            self.results_table.setItem(row, 0, QTableWidgetItem(motif))
+        for row_index, row_data in enumerate(results):
 
-            for col, seq in enumerate(self.sequences):
+            motif = row_data["motif"]
+            self.results_table.setItem(row_index, 0, QTableWidgetItem(motif))
 
-                count = count_motif(seq["sequence"], motif)
+            for col_index, count in enumerate(row_data["counts"]):
 
                 item = QTableWidgetItem(str(count))
 
                 if count > 0:
                     item.setBackground(QColor("lightgreen"))
 
-                self.results_table.setItem(row, col + 1, item)
+                self.results_table.setItem(row_index, col_index + 1, item)
 
         self.results_table.resizeColumnsToContents()
 
         self.draw_genome_map(motifs)
         self.draw_motif_bar_chart(motifs)
 
-        pos_text = find_positions(self.sequences, motifs)
+        positions = get_motif_positions(self.sequences, motifs)
 
-        self.positions_view.setText(pos_text)
+        text = ""
+        for seq_name, motif_dict in positions.items():
+            text += f"=== {seq_name} ===\n"
+            for motif, pos_list in motif_dict.items():
+                text += f"{motif}: {pos_list}\n"
+            text += "\n"
+
+        self.positions_view.setText(text)
 
         self.log("Analiza zakończona")
 
@@ -507,8 +515,8 @@ class DNAAnalyzer(QMainWindow):
 
         self.visual_scene.clear()
 
-        y = 40
-        scale = 20
+        y = self.ROW_HEIGHT
+        scale = self.SCALE
 
         nucleotide_colors = {
             "A": QColor(173, 255, 47),
@@ -534,7 +542,7 @@ class DNAAnalyzer(QMainWindow):
 
             # rysowanie DNA
             for i, nucleotide in enumerate(sequence):
-                x = 120 + i * scale
+                x = self.LEFT_MARGIN + i * scale
                 rect = QRectF(x, y, scale, scale)
 
                 color = nucleotide_colors.get(
@@ -548,20 +556,15 @@ class DNAAnalyzer(QMainWindow):
                 text_item.setPos(x + 4, y)
                 self.visual_scene.addItem(text_item)
 
-            # nakładanie motywów (dalej UI, ale bez logiki find w core)
             for m_index, motif in enumerate(motifs):
 
-                start = 0
+                positions =  get_positions_single(sequence, motif)
 
-                while True:
-                    pos = sequence.find(motif, start)
-                    if pos == -1:
-                        break
-
+                for pos in positions:
                     motif_color = motif_colors[m_index % len(motif_colors)]
 
                     for j, nucleotide in enumerate(motif):
-                        x = 120 + (pos + j) * scale
+                        x = self.LEFT_MARGIN + (pos + j) * scale
                         rect = QRectF(x, y, scale, scale)
 
                         self.visual_scene.addRect(
@@ -574,9 +577,7 @@ class DNAAnalyzer(QMainWindow):
                         text_item.setPos(x + 4, y)
                         self.visual_scene.addItem(text_item)
 
-                    start = pos + 1
-
-            y += 40
+            y += self.ROW_HEIGHT
 
 
     def draw_motif_bar_chart(self, motifs):
@@ -591,7 +592,7 @@ class DNAAnalyzer(QMainWindow):
         x = range(n_motif)
 
         for i, seq in enumerate(self.sequences):
-            counts = [seq["sequence"].count(m) for m in motifs]
+            counts = count_motifs_for_sequence(seq["sequence"], motifs)
 
             positions = [xi + i * bar_width for xi in x]
 
@@ -605,43 +606,42 @@ class DNAAnalyzer(QMainWindow):
         ax.legend()
 
         self.visual_canvas.draw()
-    # RECENT FILES
 
-    def update_recent_files(self, path):
+    # EKSPORT
 
-        if path in self.recent_files:
-            self.recent_files.remove(path)
+    def export_results(self):
 
-        self.recent_files.insert(0, path)
+        if self.results_table.rowCount() == 0:
+            self.log("Brak danych do eksportu")
+            return
 
-        if len(self.recent_files) > self.max_recent:
-            self.recent_files = self.recent_files[:self.max_recent]
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Zapisz CSV",
+            "",
+            "CSV (*.csv)"
+        )
 
-        self.refresh_recent_list()
-        self.refresh_recent_menu()
+        if not path:
+            return
 
-        save_json("recent.json", self.recent_files)
+        try:
 
-    def refresh_recent_list(self):
+            motifs = self.get_selected_motifs()
 
-        self.recent_list.clear()
+            csv_data, pdf_fig = build_export_data(self, motifs)
 
-        for path in self.recent_files:
-            self.recent_list.addItem(path)
+            save_csv(path, csv_data)
 
-    def refresh_recent_menu(self):
+            pdf_path = path.replace(".csv", ".pdf")
+            save_pdf(pdf_path, pdf_fig)
 
-        self.recent_menu.clear()
+            self.log(f"Zapisano CSV: {path}")
+            self.log(f"Zapisano PDF: {pdf_path}")
 
-        for path in self.recent_files:
+        except Exception as e:
+            self.log(f"Błąd eksportu: {e}")
 
-            action = QAction(path, self)
-
-            action.triggered.connect(
-                lambda checked=False, p=path: self.open_file(p)
-            )
-
-            self.recent_menu.addAction(action)
 
 
 

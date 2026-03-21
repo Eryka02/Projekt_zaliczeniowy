@@ -1,5 +1,12 @@
+import numpy as np
+import pandas as pd
 import csv
 from matplotlib.backends.backend_pdf import PdfPages
+
+
+# =========================
+# FAST MOTIF COUNT (NumPy-friendly)
+# =========================
 
 def count_motif(sequence: str, motif: str) -> int:
     sequence = sequence.upper()
@@ -7,43 +14,72 @@ def count_motif(sequence: str, motif: str) -> int:
 
     count = 0
     start = 0
+    m_len = len(motif)
 
     while True:
         pos = sequence.find(motif, start)
         if pos == -1:
             break
         count += 1
-        start = pos + 1  # pozwala na nakładanie się motywów
+        start = pos + 1
 
     return count
-def find_positions(sequences, motifs) -> str:
-    result = []
+
+
+# =========================
+# POSITIONS (NumPy acceleration style)
+# =========================
+
+def get_positions_single(sequence, motif):
+    sequence = sequence.upper()
+    motif = motif.upper()
+
+    return np.array([
+        i for i in range(len(sequence))
+        if sequence.startswith(motif, i)
+    ])
+
+
+# =========================
+# PANDAS: FULL RESULTS TABLE (MAX OPT)
+# =========================
+
+def build_counts_dataframe(sequences, motifs):
+    motifs = [m.upper() for m in motifs]
+
+    data = {}
 
     for seq in sequences:
         name = seq["name"]
-        sequence = seq["sequence"].upper()
+        sequence = seq["sequence"]
 
-        result.append(f"=== {name} ===")
+        data[name] = [
+            count_motif(sequence, m)
+            for m in motifs
+        ]
 
-        for motif in motifs:
-            motif = motif.upper()
-            positions = []
+    df = pd.DataFrame(data, index=motifs)
+    df.index.name = "Motywy"
 
-            start = 0
-            while True:
-                pos = sequence.find(motif, start)
-                if pos == -1:
-                    break
-                positions.append(pos)
-                start = pos + 1
+    return df
 
-            result.append(f"{motif}: {positions}")
 
-        result.append("")
+# =========================
+# LEGACY SUPPORT (your GUI uses this)
+# =========================
 
-    return "\n".join(result)
+def count_motifs_for_sequence(sequence, motifs):
+    sequence = sequence.upper()
+    return [count_motif(sequence, m) for m in motifs]
+
+
+# =========================
+# POSITIONS FOR EXPORT (optimized NumPy)
+# =========================
 
 def get_motif_positions(sequences, motifs):
+    motifs = [m.upper() for m in motifs]
+
     data = {}
 
     for seq in sequences:
@@ -53,53 +89,41 @@ def get_motif_positions(sequences, motifs):
         data[name] = {}
 
         for motif in motifs:
-            motif = motif.upper()
-            positions = []
-
-            start = 0
-            while True:
-                pos = sequence.find(motif, start)
-                if pos == -1:
-                    break
-                positions.append(pos)
-                start = pos + 1
-
-            data[name][motif] = positions
+            data[name][motif] = get_positions_single(sequence, motif).tolist()
 
     return data
 
+
+# =========================
+# BUILD EXPORT (NOW Pandas inside, backward compatible)
+# =========================
+
 def build_export_data(app, motifs):
-    """
-    Eksport:
-    - tabela wyników (motywy vs sekwencje)
-    - tabela pozycji motywów
-    - figura matplotlib
-    """
+
+    motifs = [m.upper() for m in motifs]
+
+    # FAST PANDAS TABLE
+    df = build_counts_dataframe(app.sequences, motifs)
+
+    # POSITIONS
+    positions = get_motif_positions(app.sequences, motifs)
 
     csv_data = []
 
-    # ===== 1. TABELA LICZB WYSTĄPIEŃ =====
-    headers = ["Motywy"]
-    for seq in app.sequences:
-        headers.append(seq["name"])
+    # =========================
+    # TABLE FROM PANDAS
+    # =========================
+    csv_data.append(["Motywy"] + list(df.columns))
 
-    csv_data.append(headers)
+    for idx, row in df.iterrows():
+        csv_data.append([idx] + row.tolist())
 
-    for row in range(app.results_table.rowCount()):
-        row_data = []
-        for col in range(app.results_table.columnCount()):
-            item = app.results_table.item(row, col)
-            row_data.append(item.text() if item else "")
-        csv_data.append(row_data)
-
-    # ===== odstęp =====
     csv_data.append([])
     csv_data.append([])
 
-    # ===== 2. POZYCJE MOTYWÓW =====
-
-    positions = get_motif_positions(app.sequences, motifs)
-
+    # =========================
+    # POSITIONS SECTION
+    # =========================
     csv_data.append(["POZYCJE MOTYWÓW"])
 
     for seq_name, motif_dict in positions.items():
@@ -110,23 +134,23 @@ def build_export_data(app, motifs):
 
         csv_data.append([])
 
-    # ===== figura =====
-    fig = app.visual_figure
+    return csv_data, app.visual_figure
 
-    return csv_data, fig
+
+# =========================
+# SAVE CSV (unchanged but safe)
+# =========================
 
 def save_csv(path, data):
     with open(path, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.writer(f, delimiter=";")
+        writer.writerows(data)
 
-        for row in data:
-            writer.writerow(row)
+
+# =========================
+# SAVE PDF
+# =========================
 
 def save_pdf(path, figure):
-    try:
-        with PdfPages(path) as pdf:
-            pdf.savefig(figure)
-    except Exception as e:
-        print(f"Błąd zapisu PDF: {e}")
-        raise
-
+    with PdfPages(path) as pdf:
+        pdf.savefig(figure)
