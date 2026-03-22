@@ -1,23 +1,23 @@
-from core.analysis import count_motif
+from core.analysis import get_positions_single
 
 class AnalysisService:
-
     def __init__(self, sequences):
         self.sequences = sequences
 
-    def count_all(self, motifs):
-        results = []
+    def analyze_all(self, motifs):
+        result = {}
 
-        for motif in motifs:
-            row = {
-                "motif": motif,
-                "counts": []
-            }
+        for seq in self.sequences:
+            seq_name = seq["name"]
+            seq_text = seq["sequence"].upper()
+            result[seq_name] = {}
 
-            for seq in self.sequences:
-                count = count_motif(seq["sequence"], motif)
-                row["counts"].append(count)
+            for motif in motifs:
+                motif = motif.upper()
+                positions = get_positions_single(seq_text, motif).tolist()
+                result[seq_name][motif] = {
+                    "count": len(positions),
+                    "positions": positions
+                }
 
-            results.append(row)
-
-        return results
+        return result

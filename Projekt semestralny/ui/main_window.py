@@ -4,11 +4,13 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QTextEdit, QListWidget, QTabWidget, QFileDialog,
     QLabel, QInputDialog, QMessageBox, QTableWidget, QTableWidgetItem,
-    QListWidgetItem, QGraphicsView, QGraphicsScene, QGraphicsTextItem
+    QListWidgetItem, QGraphicsView, QGraphicsScene, QGraphicsTextItem,
+    QScrollArea
 )
+from PyQt6.QtGui import QAction, QBrush, QColor, QPen, QPainter
+from PyQt6.QtCore import Qt, QRectF, QTimer
 
-from PyQt6.QtGui import QAction, QBrush, QColor, QPen
-from PyQt6.QtCore import Qt, QRectF
+from pathlib import Path
 
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
@@ -17,12 +19,8 @@ from core.analysis import (
     build_export_data,
     save_csv,
     save_pdf,
-    count_motif,
-    get_motif_positions,
-    count_motifs_for_sequence,
-    get_positions_single
+    build_heatmap_matrix_from_positions
 )
-
 from core.fasta import parse_fasta_file
 from core.ncbi import fetch_sequence_from_ncbi
 from utils.json_utils import load_json, save_json
@@ -45,6 +43,7 @@ class DNAAnalyzer(QMainWindow):
 
         self.sequences = []
         self.motifs = []
+        self.analysis_cache = {}
 
         self.recent_files = load_json("recent.json", [])
         self.recent_ncbi = load_json("recent_ncbi.json", [])
@@ -54,6 +53,10 @@ class DNAAnalyzer(QMainWindow):
 
         self.refresh_recent_list()
         self.refresh_recent_menu()
+        self.export_figures = []
+
+        self.viewport_size = 80
+        self.SCALE = 16
 
     # GUI
     def init_ui(self):
@@ -142,6 +145,7 @@ class DNAAnalyzer(QMainWindow):
         sidebar_widget = QWidget()
         sidebar_widget.setLayout(sidebar)
 
+
         # TABS
 
         self.tabs = QTabWidget()
@@ -171,9 +175,12 @@ class DNAAnalyzer(QMainWindow):
         results_layout.addWidget(self.results_table)
 
         self.visual_scene = QGraphicsScene()
-        self.visual_view = QGraphicsView(self.visual_scene)
+        self.visual_view = ZoomGraphicsView(self.visual_scene, self)
+        self.visual_view.setMinimumHeight(self.VIEW_HEIGHT)
         self.visual_view.setMinimumHeight(self.VIEW_HEIGHT)
         results_layout.addWidget(self.visual_view)
+        self.zoom_start = 0
+        self.viewport_size = 150
 
         self.positions_view = QTextEdit()
         self.positions_view.setReadOnly(True)
@@ -183,15 +190,16 @@ class DNAAnalyzer(QMainWindow):
         self.tabs.addTab(results_widget, "Wyniki analizy")
 
         # Wizualizacja
-        self.visual_figure = Figure(figsize=(6, 4))
-        self.visual_canvas = FigureCanvas(self.visual_figure)
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
 
-        visual_widget = QWidget()
-        visual_layout = QVBoxLayout()
-        visual_layout.addWidget(self.visual_canvas)
+        self.visual_container = QWidget()
+        self.visual_layout = QVBoxLayout()
 
-        visual_widget.setLayout(visual_layout)
-        self.tabs.addTab(visual_widget, "Wizualizacja")
+        self.visual_container.setLayout(self.visual_layout)
+        self.scroll_area.setWidget(self.visual_container)
+
+        self.tabs.addTab(self.scroll_area, "Wizualizacja")
 
         # LOGI
 
@@ -209,6 +217,8 @@ class DNAAnalyzer(QMainWindow):
 
         main_widget.setLayout(main_layout)
         self.setCentralWidget(main_widget)
+
+
 
     # NCBI
     def fetch_from_ncbi(self):
@@ -407,21 +417,31 @@ class DNAAnalyzer(QMainWindow):
 
     # MOTYWY
     def add_motif(self):
-
         motif, ok = QInputDialog.getText(self, "Dodaj motyw", "Motyw DNA:")
 
-        if ok and motif:
-            motif = motif.upper()
+        if not ok or not motif:
+            return
 
-            item = QListWidgetItem(motif)
+        motif = motif.strip().upper()
 
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+        if not motif:
+            return
 
-            item.setCheckState(Qt.CheckState.Checked)
+        if any(ch not in "ATGC" for ch in motif):
+            QMessageBox.warning(self, "Błąd", "Motyw może zawierać tylko A, T, G, C")
+            return
 
-            self.motif_list.addItem(item)
+        existing = {self.motif_list.item(i).text() for i in range(self.motif_list.count())}
+        if motif in existing:
+            self.log(f"Motyw już istnieje: {motif}")
+            return
 
-            self.log(f"Motyw dodany: {motif}")
+        item = QListWidgetItem(motif)
+        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+        item.setCheckState(Qt.CheckState.Checked)
+        self.motif_list.addItem(item)
+
+        self.log(f"Motyw dodany: {motif}")
 
     def remove_selected_motif(self):
         if self.motif_list.count() == 0:
@@ -458,6 +478,8 @@ class DNAAnalyzer(QMainWindow):
 
     def run_analysis(self):
 
+        self.export_figures = []
+
         if not self.sequences:
             self.log("Brak sekwencji")
             return
@@ -477,14 +499,14 @@ class DNAAnalyzer(QMainWindow):
         self.results_table.setRowCount(len(motifs))
 
         service = AnalysisService(self.sequences)
-        results = service.count_all(motifs)
+        self.analysis_cache = service.analyze_all(motifs)
 
-        for row_index, row_data in enumerate(results):
-
-            motif = row_data["motif"]
+        for row_index, motif in enumerate(motifs):
             self.results_table.setItem(row_index, 0, QTableWidgetItem(motif))
 
-            for col_index, count in enumerate(row_data["counts"]):
+            for col_index, seq in enumerate(self.sequences):
+                seq_name = seq["name"]
+                count = self.analysis_cache[seq_name][motif]["count"]
 
                 item = QTableWidgetItem(str(count))
 
@@ -496,15 +518,13 @@ class DNAAnalyzer(QMainWindow):
         self.results_table.resizeColumnsToContents()
 
         self.draw_genome_map(motifs)
-        self.draw_motif_bar_chart(motifs)
-
-        positions = get_motif_positions(self.sequences, motifs)
+        self.draw_combined_visualization(motifs)
 
         text = ""
-        for seq_name, motif_dict in positions.items():
+        for seq_name, motif_dict in self.analysis_cache.items():
             text += f"=== {seq_name} ===\n"
-            for motif, pos_list in motif_dict.items():
-                text += f"{motif}: {pos_list}\n"
+            for motif, data in motif_dict.items():
+                text += f"{motif}: {data['positions']}\n"
             text += "\n"
 
         self.positions_view.setText(text)
@@ -515,8 +535,12 @@ class DNAAnalyzer(QMainWindow):
 
         self.visual_scene.clear()
 
-        y = self.ROW_HEIGHT
+        y_info = 5
+        y_dna = 30
+        y_motif = 70
+
         scale = self.SCALE
+        viewport = self.viewport_size
 
         nucleotide_colors = {
             "A": QColor(173, 255, 47),
@@ -535,77 +559,154 @@ class DNAAnalyzer(QMainWindow):
 
         for seq in self.sequences:
 
-            sequence = seq["sequence"]
-            name = seq["name"]
+            full = seq["sequence"]
+            length = len(full)
 
-            self.visual_scene.addText(name).setPos(10, y - 25)
+            start = max(0, min(self.zoom_start, length - viewport))
+            end = min(start + viewport, length)
 
-            # rysowanie DNA
-            for i, nucleotide in enumerate(sequence):
+            visible = full[start:end]
+
+            self.visual_scene.addText(
+                f"{seq['name']} | {start} - {end}"
+            ).setPos(10, y_info)
+
+
+            for i, n in enumerate(visible):
                 x = self.LEFT_MARGIN + i * scale
-                rect = QRectF(x, y, scale, scale)
 
-                color = nucleotide_colors.get(
-                    nucleotide.upper(),
-                    QColor(211, 211, 211)
+                self.visual_scene.addRect(
+                    QRectF(x, y_dna, scale, scale),
+                    QPen(Qt.GlobalColor.black),
+                    QBrush(nucleotide_colors.get(n, QColor(200, 200, 200)))
                 )
 
-                self.visual_scene.addRect(rect, QPen(Qt.GlobalColor.black), QBrush(color))
+                if scale >= 14:
+                    text = QGraphicsTextItem(n)
 
-                text_item = QGraphicsTextItem(nucleotide)
-                text_item.setPos(x + 4, y)
-                self.visual_scene.addItem(text_item)
+                    rect = text.boundingRect()
+                    text.setPos(
+                        x + (scale - rect.width()) / 2,
+                        y_dna + (scale - rect.height()) / 2 - 1
+                    )
 
+                    self.visual_scene.addItem(text)
+
+            # MOTIFS
             for m_index, motif in enumerate(motifs):
 
-                positions =  get_positions_single(sequence, motif)
+                positions = self.analysis_cache[seq["name"]][motif]["positions"]
 
                 for pos in positions:
-                    motif_color = motif_colors[m_index % len(motif_colors)]
 
-                    for j, nucleotide in enumerate(motif):
-                        x = self.LEFT_MARGIN + (pos + j) * scale
-                        rect = QRectF(x, y, scale, scale)
+                    if start <= pos < end:
 
-                        self.visual_scene.addRect(
-                            rect,
-                            QPen(Qt.GlobalColor.black),
-                            QBrush(motif_color)
-                        )
+                        local = pos - start
+                        color = motif_colors[m_index % len(motif_colors)]
 
-                        text_item = QGraphicsTextItem(nucleotide)
-                        text_item.setPos(x + 4, y)
-                        self.visual_scene.addItem(text_item)
+                        for j in range(len(motif)):
+                            x = self.LEFT_MARGIN + (local + j) * scale
 
-            y += self.ROW_HEIGHT
+                            self.visual_scene.addRect(
+                                QRectF(x, y_motif, scale, scale),
+                                QPen(Qt.GlobalColor.black),
+                                QBrush(color)
+                            )
 
+            y_info += self.ROW_HEIGHT + 30
+            y_dna += self.ROW_HEIGHT + 30
+            y_motif += self.ROW_HEIGHT + 30
 
-    def draw_motif_bar_chart(self, motifs):
+    def draw_combined_visualization(self, motifs):
+
+        self.export_figures = []
+
+        # czyści stare wykresy
+        while self.visual_layout.count():
+            item = self.visual_layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+
+        # BAR CHART
+        fig_bar = Figure(figsize=(8, 4))
+        canvas_bar = FigureCanvas(fig_bar)
+        self.export_figures.append(fig_bar)
+        canvas_bar.setMinimumHeight(400)
+        ax = fig_bar.add_subplot(111)
 
         n_seq = len(self.sequences)
-        self.visual_figure.clear()
-        ax = self.visual_figure.add_subplot(111)
-
         n_motif = len(motifs)
 
         bar_width = 0.8 / n_seq
         x = range(n_motif)
 
         for i, seq in enumerate(self.sequences):
-            counts = count_motifs_for_sequence(seq["sequence"], motifs)
-
+            counts = [
+                self.analysis_cache[seq["name"]][motif]["count"]
+                for motif in motifs
+            ]
             positions = [xi + i * bar_width for xi in x]
-
             ax.bar(positions, counts, width=bar_width, label=seq["name"])
 
-        ax.set_xticks([xi + bar_width * (n_seq / 2) - (bar_width / 2) for xi in x])
+        ax.set_xticks([
+            xi + bar_width * (n_seq / 2) - (bar_width / 2)
+            for xi in x
+        ])
         ax.set_xticklabels(motifs)
+        ax.set_title("Liczba wystąpień motywów")
+        ax.set_ylabel("Liczba")
 
-        ax.set_ylabel("Liczba wystąpień")
-        ax.set_title("Wystąpienia motywów DNA w sekwencjach")
         ax.legend()
 
-        self.visual_canvas.draw()
+        self.visual_layout.addWidget(canvas_bar)
+
+        # HEATMAPY
+
+        for seq in self.sequences:
+
+            fig = Figure(figsize=(10, 4))
+            canvas = FigureCanvas(fig)
+            self.export_figures.append(fig)
+            canvas.setMinimumHeight(400)
+            ax = fig.add_subplot(111)
+
+            motif_positions = {
+                motif: self.analysis_cache[seq["name"]][motif]["positions"]
+                for motif in motifs
+            }
+            matrix = build_heatmap_matrix_from_positions(seq["sequence"], motifs, motif_positions)
+
+            im = ax.imshow(
+                matrix,
+                aspect="equal",
+                interpolation="none",
+                cmap="magma",
+                rasterized=True
+            )
+
+            # Y = motywy
+            ax.set_yticks(range(len(motifs)))
+            ax.set_yticklabels(motifs)
+
+            # X = segmenty
+            segments = [f"S{j + 1}" for j in range(matrix.shape[1])]
+            ax.set_xticks(range(len(segments)))
+
+            if len(segments) > 20:
+                ax.set_xticklabels(segments, rotation=90, fontsize=6)
+            else:
+                ax.set_xticklabels(segments, rotation=45)
+
+            ax.set_title(f"Heatmapa: {seq['name']}")
+
+            fig.colorbar(im, ax=ax)
+
+            self.visual_layout.addWidget(canvas)
+
+        self.visual_layout.addStretch()
+        total_widgets = self.visual_layout.count()
+        self.visual_container.setMinimumHeight(total_widgets * 420)
 
     # EKSPORT
 
@@ -629,12 +730,13 @@ class DNAAnalyzer(QMainWindow):
 
             motifs = self.get_selected_motifs()
 
-            csv_data, pdf_fig = build_export_data(self, motifs)
+            csv_data, figures = build_export_data(self, motifs)
 
             save_csv(path, csv_data)
 
-            pdf_path = path.replace(".csv", ".pdf")
-            save_pdf(pdf_path, pdf_fig)
+            pdf_path = str(Path(path).with_suffix(".pdf"))
+            save_pdf(pdf_path, figures)
+
 
             self.log(f"Zapisano CSV: {path}")
             self.log(f"Zapisano PDF: {pdf_path}")
@@ -643,8 +745,76 @@ class DNAAnalyzer(QMainWindow):
             self.log(f"Błąd eksportu: {e}")
 
 
+class ZoomGraphicsView(QGraphicsView):
+
+    def __init__(self, scene, parent=None):
+        super().__init__(scene, parent)
+
+        self.parent = parent
+
+        self.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self.setDragMode(QGraphicsView.DragMode.NoDrag)
+
+        self.last_x = None
+        self.dragging = False
+
+        # anti crash
+        self._blocked = False
 
 
+    def wheelEvent(self, event):
+        pass
 
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.dragging = True
+            self.last_x = event.position().x()
 
+    def mouseReleaseEvent(self, event):
+        self.dragging = False
+        self.last_x = None
 
+    def mouseMoveEvent(self, event):
+
+        if not self.dragging:
+            return
+
+        if self.last_x is None:
+            self.last_x = event.position().x()
+
+        delta = event.position().x() - self.last_x
+        self.last_x = event.position().x()
+
+        self.parent.zoom_start -= int(delta / 3)
+
+        if self.parent.zoom_start < 0:
+            self.parent.zoom_start = 0
+
+        if self.parent.sequences:
+            max_len = max(len(seq["sequence"]) for seq in self.parent.sequences)
+            max_start = max(0, max_len - self.parent.viewport_size)
+
+            if self.parent.zoom_start > max_start:
+                self.parent.zoom_start = max_start
+
+        self.schedule_redraw()
+
+    def schedule_redraw(self):
+
+        if self._blocked:
+            return
+
+        self._blocked = True
+
+        QTimer.singleShot(60, self._do_redraw)
+
+    def _do_redraw(self):
+
+        self._blocked = False
+
+        try:
+            self.parent.draw_genome_map(
+                self.parent.get_selected_motifs()
+            )
+        except Exception as e:
+            print("REDRAW ERROR:", e)
